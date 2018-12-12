@@ -1,0 +1,487 @@
+---
+title: "RNAed_notebook"
+author: "ab"
+date: "November 27, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r Functions, echo = FALSE}
+#Attach libraries
+require(tidyverse)
+
+#Define functions
+numextract.int <- function(string){ 
+  str_extract(string, "\\-*\\d*\\d*")
+} 
+numextract.double <- function(string){ 
+  str_extract(string, "\\-*\\d+\\.*\\d*")
+} 
+Load.Data <- function(Path, Save){
+  #Establish filepaths
+  Path.Data <- Path
+  Files <- list.files(file.path(Path.Data), pattern = "*.vcf$")
+  Meta <- read_csv("FANTOM6_samples.csv", col_names = TRUE)
+  #Merging loop
+  for (i in 1:length(Files)) {
+    #Read vcf
+    tmp.vcf <- readLines(file.path(Path.Data, Files[i]))
+    tmp.vcf.data <- read.table(file.path(Path.Data, Files[i]))
+    #Extract and atach colnames
+    tmp.vcf <- tmp.vcf[-(grep("#CHROM", tmp.vcf) + 1):-(length(tmp.vcf))]
+    vcf.names <- unlist(strsplit(tmp.vcf[length(tmp.vcf)], "\t"))
+    names(tmp.vcf.data)<-vcf.names
+    #Extract DP, EF and Metadata
+    tmp.vcf.data <- tmp.vcf.data %>% 
+      mutate(DP = INFO %>% 
+               str_split_fixed(., pattern = ";", n = 2) %>% 
+               as.tibble() %>%
+               pull(V1) %>%
+               numextract.double(.) %>%
+               as.integer(), 
+             EF = INFO %>% 
+               str_split_fixed(., pattern = ";", n = 2) %>% 
+               as.tibble() %>%
+               pull(V2) %>%
+               numextract.double(.) %>%
+               as.numeric(),
+             EDIT = paste(REF, ALT, sep = " to "),
+             File.Name = rep(paste(Files[i]), length(.$`#CHROM`))) %>%
+      mutate(SampleID = File.Name %>% 
+               str_sub(., 1, -5), 
+             EDIT = paste(REF, ALT, sep = " to ")
+      ) %>%
+      select(-INFO, -FORMAT, -File.Name, -starts_with("RDhi", ignore.case = FALSE))
+    if (i == 1) {
+      Data <- tmp.vcf.data
+      rm(tmp.vcf.data)
+    } else {
+      if (i > 1 & i < length(Files)) {
+        Data <- rbind(Data, tmp.vcf.data) 
+      } else {
+        if (i == length(Files)) {
+          Data <- rbind(Data, tmp.vcf.data)
+          #Create Count variable
+          Data <- Data %>%
+            mutate(Count = round(DP*EF, 0))
+          #Create Factorial EF variable
+          Data <- Data %>% 
+            mutate(EF.Factor = EF)
+          Data[Data$EF <= 0.25, ]$EF.Factor <- rep("4.LowEf", length(Data[Data$EF <= 0.25, ]$EF.Factor))
+          Data[Data$EF > 0.25 & Data$EF <= 0.5, ]$EF.Factor <- rep("3.MidEf Left", length(Data[Data$EF > 0.25 & Data$EF <= 0.5, ]$EF.Factor))
+          Data[Data$EF > 0.5 & Data$EF <= 0.75, ]$EF.Factor <- rep("2.MidEf Right", length(Data[Data$EF > 0.5 & Data$EF <= 0.75, ]$EF.Factor))
+          Data[Data$EF > 0.75, ]$EF.Factor <- rep("1.HighEf", length(Data[Data$EF > 0.75, ]$EF.Factor))
+          #Attach metadata
+          Data <- Data %>%
+            inner_join(., Meta, by = c("SampleID" = "Sample ID"))
+          #Substitute NA for 'Control'
+          Data$`KD gene ID`[is.na(Data$`KD gene ID`)] <- "Control"
+          Data <- Data %>%
+            as.tibble()
+          if(Save == TRUE){
+            write_tsv(Data, file.path(Path.Data, "vcf_comp.tsv"), col_names = TRUE)
+          }
+          return(Data)
+        }
+      }
+    }
+  }
+}
+#Chromosome-wise plotting
+Plot.EF.Relative <- function(Cell_Type, Depth_Cut, EdEvents_Cut) {
+  
+  Cell.Type <- c("ADSC", "BEC", "CN", "HDF (neonatal)", "FF-IPSC (IMS)", "iPSC (YJK)", "KER", "LEC", "NPC (YJK)")
+  
+  chrom.ordered <- c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10", "chr11", 
+                   "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", 
+                   "chr22", "chrX", "chrY", "chrM")
+  
+  Cell.Def <- as.tibble(table(Data$`Cell description`)) %>% 
+    pull(Var1)
+  
+  temp <- Data %>% 
+  filter(`Cell type ID` %in% Cell.Type[Cell_Type] & DP > Depth_Cut) %>%
+  group_by(EF.Factor, `#CHROM`, `KD gene ID`, EDIT) %>%
+  summarise(counts = n()) %>%
+  filter(EF.Factor %in% c("1.HighEf", "4.LowEf") & counts > EdEvents_Cut)
+  
+  
+  
+Data.Rel <- tibble()
+for (z in 1:length(table(temp$EDIT))) {
+  temp.1 <- as.tibble(table(temp$EDIT))
+  temp.2 <- temp %>%
+    filter(EDIT == temp.1$Var1[z]) 
+  for (x in 1:length(table(temp$`KD gene ID`))) {
+  temp.3 <- as.tibble(table(temp$`KD gene ID`))
+  temp.4 <- temp.2 %>%
+    filter(`KD gene ID` == temp.3$Var1[x]) 
+  for (y in 1:length(table(temp$`#CHROM`))) {
+  temp.5 <- as.tibble(table(temp$`#CHROM`))
+  temp.6 <- temp.4 %>%
+    filter(`#CHROM` == temp.5$Var1[y])
+  value <- round(as.numeric(temp.6[1, 5] / (temp.6[2, 5] + temp.6[1, 5])), 3)
+  value.count.ef <- as.numeric(temp.6[1, 5])
+  value.count.tot <- as.numeric(temp.6[1, 5] + temp.6[2, 5])
+  temp.7 <- tibble(`#CHROM` = temp.5$Var1[y], 
+                   `KD gene ID` = temp.3$Var1[x],
+                   EDIT = temp.1$Var1[z],
+                   EF.Relative = value, 
+                   Event.Count.Tot = value.count.tot,
+                   Event.Count.Ef = value.count.ef)
+  Data.Rel <- rbind(Data.Rel, temp.7) %>%
+    mutate(`#CHROM` = factor(`#CHROM`, levels = chrom.ordered))
+  }
+  if (x == length(table(temp$`KD gene ID`))) {
+    rm(temp.1, temp.2, temp.3, temp.4, temp.5, temp.6, temp.7, x, y, z)
+    }
+  } 
+}
+
+
+
+return(
+  ggplot(data = Data.Rel) + 
+    geom_col(aes(x = `#CHROM`, y = EF.Relative, fill = Event.Count.Tot), 
+           position = "dodge") + 
+    scale_fill_gradient2(high = "red", low = "blue", mid = "yellow", midpoint = 1000) +
+    facet_grid(`KD gene ID` ~ EDIT) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) +
+    labs(title = paste(Cell.Def[Cell_Type]))
+)
+}
+Plot.EF.Absolute <- function(Cell_Type, Depth_Cut) {
+  
+  Cell.Type <- as.tibble(table(Data$`Cell type ID`)) %>%
+    pull(Var1)
+  
+  Cell.Def <- as.tibble(table(Data$`Cell description`)) %>% 
+    pull(Var1)
+  
+  return(
+    Data %>% 
+      filter(`Cell type ID` %in% Cell.Type[Cell_Type] & DP > Depth_Cut) %>% 
+      ggplot(data = .) + 
+      geom_bar(aes(x = `#CHROM`, y = ..count.., fill = EF.Factor)) + 
+      scale_fill_gradientn(colours = terrain.colors(50))+ 
+      facet_grid(`KD gene ID` ~ EDIT) + 
+      theme_bw() + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) + 
+      labs(title = paste(Cell.Def[Cell_Type]))
+  )
+}
+Plot.EF.Dist <- function(Cell_Type, Depth_Cut) {
+  
+  Cell.Type <- c("ADSC", "BEC", "CN", "HDF (neonatal)", "FF-IPSC (IMS)", "iPSC (YJK)", "KER", "LEC", "NPC (YJK)")
+  
+  Cell.Def <- as.tibble(table(Data$`Cell description`)) %>% 
+    pull(Var1)
+  
+  Plot <- ggplot(data = Data %>% 
+                   filter(`Cell type ID` == Cell.Type[Cell_Type] & DP >= Depth_Cut)) + 
+    geom_density(aes(x = EF, fill = `KD gene ID`), alpha = 1/2) +
+    facet_grid(EDIT ~ .) + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) + 
+    labs(title = paste(Cell.Def[Cell_Type]))
+  return(Plot)
+  
+  facet_grid(SM.Type ~ .) +
+  theme_bw()
+  
+  
+}
+```
+
+```{r Load data, echo = FALSE}
+Data <- Load.Data("Data/", TRUE)
+
+```
+
+
+```{r explore further, echo = FALSE}
+#Plotting
+#For function calls
+# Arg.value:  Cell Type:      KD present:
+# 1           ADSC            FALSE
+# 2           BEC             FALSE
+# 3           CN              FALSE
+# 4           iPSC (YJK)      FALSE
+# 5           KER             FALSE
+# 6           LEC             FALSE
+# 7           NPC (EJK)       FALSE
+# 8           FF-iPSC (IMS)   TRUE
+# 9           HDF (neonatal)  TRUE
+
+#EF.Factorial (Factorial Editing Fraction) is defined as:
+#1.HighEf = assigned to samples with editing fraction > 0.75
+#2.MidEf Right = sampels with editing fraction 0.25 < EF <= 0.5
+#3.MedEf Left = sampels with editing fractino 0.5 < EF <= 0.75
+#4.LowEf = samples with editing fraction <= 0.25 
+
+#EF.Relative (Relative Editing Fraction) is defined as:
+#EF.Relative = count(HighEf events) / count(LowEf events)
+
+
+#Check density
+Plot.EF.Dist(5, 20)
+
+```
+
+
+```{r more plotting, echo=FALSE}
+
+Plot.EF.Relative(Cell_Type = 5, Depth_Cut = 20, EdEvents_Cut = 5)
+```
+
+```{r functional}
+#Prepare bed
+Data %>%
+  mutate(POS1 = POS) %>%
+  mutate(`Sample_ID` = paste(`KD gene ID`, `Cell type ID`, SampleID, sep = "_")) %>%
+  select(`#CHROM`, POS, POS1, `Sample_ID`) %>%
+  write_tsv(., "bed/Data.bed", col_names = TRUE)
+
+#Intersect beds.....
+#Read intersections
+#Coding exons
+Data.cex <- read_tsv("bed/Intersections/CEX.intersect.txt", col_names = FALSE) %>%
+  mutate(`CEX` = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, `CEX`) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "`CEX`"))
+Data.cex.n <- Data.cex %>%
+  group_by(Sample_ID) %>%
+  summarise(n.cex = n())
+#Introns
+Data.int <- read_tsv("bed/Intersections/Intron.intersect.txt", col_names = FALSE) %>%
+  mutate(`Int+-6` = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, `Int+-6`) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "`Int+-6`"))
+Data.int.n <- Data.int %>%
+  group_by(Sample_ID) %>%
+  summarise(n.int = n())
+#5UTR
+Data.5utr <- read_tsv("bed/Intersections/5UTR.intersect.txt", col_names = FALSE) %>%
+  mutate(`5UTR` = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, `5UTR`) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "`5UTR`"))
+Data.5utr.n <- Data.5utr %>%
+  group_by(Sample_ID) %>%
+  summarise(n.5utr = n())
+#3UTR
+Data.3utr <- read_tsv("bed/Intersections/3UTR.intersect.txt", col_names = FALSE) %>%
+  mutate(`3UTR` = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, `3UTR`) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "`3UTR`"))
+Data.3utr.n <- Data.3utr %>%
+  group_by(Sample_ID) %>%
+  summarise(n.3utr = n())
+#miRNA
+Data.mir <- read_tsv("bed/Intersections/miRNA.intersect.txt", col_names = FALSE) %>%
+  mutate(miRNA = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, miRNA) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "miRNA"))
+Data.mir.n <- Data.mir %>%
+  group_by(Sample_ID) %>%
+  summarise(n.miRNA = n())
+#lincRNA
+Data.linc <- read_tsv("bed/Intersections/linc.intersect.txt", col_names = FALSE) %>%
+  mutate(lincRNA = paste(X8, X10, sep = "_")) %>%
+  select(X1, X2, X4, lincRNA) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "Sample_ID", "lincRNA"))
+Data.linc.n <- Data.linc %>%
+  group_by(Sample_ID) %>%
+  summarise(n.linc = n())
+Data.n <- list(Data.cex.n, Data.3utr.n, Data.5utr.n, Data.int.n, Data.mir.n, Data.linc.n)
+Data.Func <- Data.n %>% 
+  reduce(inner_join, by = "Sample_ID") %>%
+  mutate(`KD gene ID` = str_split_fixed(Sample_ID, "_", n = 4)[, 1], 
+         `Cell type ID` = str_split_fixed(Sample_ID, "_", n = 4)[, 2],
+         KD = str_split_fixed(Sample_ID, "_", n = 5)[, 4],
+         SampleID = str_split_fixed(Sample_ID, "_", n = 3)[, 3]) %>%
+  select(-Sample_ID) %>%
+  select(`KD gene ID`, `Cell type ID`, KD,  SampleID, everything())
+
+Data.Func.Gr <- Data.Func %>%
+  group_by(`KD gene ID`, `Cell type ID`, KD) %>%
+  summarise(`Coding Exon` = round(mean(n.cex), 0), 
+            `3UTR` = round(mean(n.3utr), 0), 
+            `5UTR` = round(mean(n.5utr), 0), 
+            Intron = round(mean(n.int), 0), 
+            miRNA = round(mean(n.miRNA), 0), 
+            lincRNA = round(mean(n.linc), 0)) %>%
+  mutate(ID = paste(`KD gene ID`, `Cell type ID`, KD, sep = "_")) %>% 
+  ungroup() %>%
+  select(-`KD gene ID`, -`Cell type ID`, -KD)
+Data.Func.Gr$SID <- factor(Data.Func.Gr$ID, levels = c("Control_FF-IPSC (IMS)_Ref", "Control_FF-IPSC (IMS)_KD", "XRN2_FF-IPSC (IMS)_KD", "TTF2_FF-IPSC (IMS)_KD", "EXOSC3_FF-IPSC (IMS)_KD", "EXOSC10_FF-IPSC (IMS)_KD", "Control_HDF (neonatal)_Ref", "Control_HDF (neonatal)_KD", "RP11-65J3.1_HDF (neonatal)_KD", "PTCHD3P1_HDF (neonatal)_KD", "Control_NPC (YJK)_Ref", "Control_iPSC (YJK)_Ref", "Control_LEC_Ref", "Control_KER_Ref", "Control_CN_Ref", "Control_BEC_Ref", "Control_ADSC_Ref"))
+Data.Func.Gr <- Data.Func.Gr %>% 
+  select(-ID) %>%
+  melt(., id.vars = "SID")
+
+
+#Plot
+ggplot(Data.Func.Gr, aes(x = SID, y = value, fill = variable)) +
+    geom_bar(stat = "identity", position = "fill") +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12))
+
+
+```
+
+```{r Check distribution of counts}
+
+hist(as.matrix(Temp.3[, -c(1:4)]))
+
+```
+
+
+```{r plot PCA}
+#Check value of principal components
+require(factoextra)
+require(FactoMineR)
+##Get Data
+#Transcripts
+Data.Genes <- read_tsv("bed/Data.Transcripts.Intersect.txt", col_names = FALSE) %>%
+  select(X1, X2, X10, X4, X5, X6) %>%
+  `colnames<-`(c("`#CHROM`", "POS", "ENSTID", "KD_gene_ID", "Cell_type_ID", "SampleID")) %>%
+  mutate(ENSTID = str_replace(ENSTID, 
+                              pattern = ".[0-9]+$",
+                              replacement = ""
+                              )
+         )
+#Change EnsID to hgncID
+require(biomaRt)
+Transcripts <- Data.Genes %>%
+  dplyr::select(ENSTID) %>%
+  distinct()
+Mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+Gene.List <- getBM(filters = "ensembl_transcript_id", 
+                   attributes = c("ensembl_transcript_id","hgnc_symbol"),
+                   values = Transcripts$ENSTID, 
+                   mart = Mart
+)
+rm(Mart, Transcripts)
+detach("package:biomaRt", unload=TRUE)
+
+#Transpose and condensate
+Data.Genes <- Data.Genes %>% 
+  left_join(., Gene.List, by = c("ENSTID" = "ensembl_transcript_id"))
+
+Temp <- Data.Genes %>% 
+  group_by(SampleID, Cell_type_ID, KD_gene_ID, hgnc_symbol) %>%
+  summarise(Counts = n()) %>% 
+  filter(Counts > 5 & hgnc_symbol != "" & is.na(hgnc_symbol) != TRUE) %>%
+  spread(key = hgnc_symbol, value = Counts) %>%
+  ungroup()
+
+
+Temp[is.na(Temp)] <- 0
+Temp.2 <- Temp[, colSums(Temp == 0) < 70]
+Temp.3 <- Temp.2 %>% 
+  filter(Cell_type_ID %in% c("HDF (neonatal)", "FF-IPSC (IMS)"))
+Data.Pca.Ch <- PCA(Temp.3[, -c(1:4)],  
+                   graph = FALSE, 
+                   scale.unit = FALSE)
+##Check the distribution of counts
+hist(as.matrix(Temp.3[, -c(1:4)]))
+
+fviz_contrib(Data.Pca.Ch, choice = "var", axes = 1, top = 30)
+fviz_eig(Data.Pca.Ch, addlabels = TRUE, ylim = c(0, 50))
+
+fviz_pca_var(Data.Pca.Ch, col.var = "contrib",
+             ggtheme = theme_minimal(), 
+             gradient.cols = c("blue", "red")
+)
+
+Res.Pca <- prcomp(Temp.3[, -c(1:4)],
+                  center = TRUE,
+                  scale. = FALSE
+)
+Results.Pca <- as.data.frame(Res.Pca$x)
+Results.Pca <- Results.Pca %>%
+  as.tibble() %>%
+  dplyr::mutate(SampleID = Temp.3$SampleID, 
+                Cell_Type_ID = Temp.3$Cell_type_ID,
+                KD_gene_ID = Temp.3$KD_gene_ID) %>%
+  dplyr::select(SampleID, Cell_Type_ID, KD_gene_ID, everything())
+
+
+plot1 <- ggplot() + 
+  geom_point(data = Results.Pca,
+             #dplyr::filter(Sm.Type == "Primary solid Tumor"), 
+             aes(x = PC1, y = PC2, 
+                 col = Cell_Type_ID)
+  ) +
+  labs(x = "PC1 71.7%", y = "PC2 9.4%") +
+  theme(legend.position = "right", 
+        legend.text = element_text(size = 10),
+        text = element_text(size = 10))
+
+plot2 <- ggplot() + 
+  geom_point(data = Results.Pca,
+             #dplyr::filter(Sm.Type == "Primary solid Tumor"), 
+             aes(x = PC1, y = PC2, 
+                 col = KD_gene_ID)
+  ) +
+  labs(x = "PC1 71.7%", y = "PC2 9.4%") +
+  theme(legend.position = "right", 
+        legend.text = element_text(size = 10),
+        text = element_text(size = 10))
+
+  
+gridExtra::grid.arrange(plot1, plot2)
+
+```
+
+``` {Questions}
+Я посмотрел на распределение Фракции Редактирования и Глубины секвенирвоания
+С ГС все как обычно, а во ФР наблюдалось два пика - с высокой эффективностью ~0.3 и с малой эффективностью ~0.8
+Выходит, в малой фракции могут быть как ошибки, так и настоящие события - для начала поработать с фракцией высокой эффективности.
+Посмотреть MethPipe, DrmSeq 
+
+```
+
+```{r SNP-like MCA}
+
+#better run on server
+##
+require(tidyverse)
+require(FactoMineR)
+require(factoextra)
+##
+#Data <- read_csv("marshfield_world.csv", col_names = TRUE) #For fun and knowledge
+##
+Data.Pca <- Data %>% 
+  mutate(ed.id = paste(`#CHROM`, POS, EDIT, sep = "_"), 
+         samp.id = paste(`KD gene ID`, SampleID, `Cell type ID`, sep = "_")) %>%
+  select(ed.id, samp.id) %>% 
+  group_by(ed.id, samp.id) %>%
+  summarise(counts = n()) %>%
+  spread(key = ed.id, value = counts, fill = "0")
+##
+RowNames <- Data.Pca %>% pull(samp.id)
+Data.Pca <- as.matrix(Data.Pca)
+Data.Pca <- Data.Pca[, -1]
+rownames(Data.Pca) <- RowNames  
+##
+Res.Mca <- MCA(Data.Pca, graph = FALSE, scale.unit = FALSE)
+fviz_mca_ind(Res.Mca, ggtheme = theme_minimal())
+
+
+```
+
+```{r Functional analysis}
+
+```
+
+
